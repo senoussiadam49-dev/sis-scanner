@@ -639,28 +639,6 @@ def run_scan():
     send_telegram(summary)
     log.info(f"Scan done — {alerts} alerts")
 
-# ── Entry point ───────────────────────────────────────────────────
-def main():
-    log.info("SIS Scanner v7 — Supabase connected")
-    load_seen_ids()  # Persist seen RSS IDs across restarts
-    log.info(f"Tickers: {len(SCAN_TICKERS)} | Vol: {VOLUME_MULT}x | Price alert: {PRICE_ALERT_PCT}%")
-    missing = [k for k,v in {
-        "ANTHROPIC_API_KEY": ANTHROPIC_KEY,"FINNHUB_API_KEY": FINNHUB_KEY,
-        "TELEGRAM_BOT_TOKEN": TELEGRAM_TOKEN,"TELEGRAM_CHAT_ID": TELEGRAM_CHAT,
-        "SUPABASE_URL": SUPABASE_URL,"SUPABASE_KEY": SUPABASE_KEY,
-    }.items() if not v]
-    if missing: log.error(f"Missing: {missing}"); return
-    log.info("All keys ✓")
-    run_scan()
-    schedule.every(30).minutes.do(run_scan)
-    log.info("Scheduler active — every 30 min, Mon-Fri 07:00-23:00 UTC")
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
-
-if __name__ == "__main__":
-    main()
-
 
 # ── EIA Energy Data Scanner ───────────────────────────────────────
 EIA_API_KEY = os.environ.get("EIA_API_KEY", "")
@@ -957,3 +935,28 @@ def send_to_pit(signal):
         log.info(f"PIT bridge: signal forwarded — {signal.get('headline','')[:60]}")
     except Exception as e:
         log.warning(f"PIT bridge error: {e}")
+
+
+
+# ── Entry point ───────────────────────────────────────────────────
+def main():
+    log.info("SIS Scanner v7 — Supabase connected")
+    load_seen_ids()  # Persist seen RSS IDs across restarts
+    log.info(f"Tickers: {len(SCAN_TICKERS)} | Vol: {VOLUME_MULT}x | Price alert: {PRICE_ALERT_PCT}%")
+    missing = [k for k,v in {
+        "ANTHROPIC_API_KEY": ANTHROPIC_KEY,"FINNHUB_API_KEY": FINNHUB_KEY,
+        "TELEGRAM_BOT_TOKEN": TELEGRAM_TOKEN,"TELEGRAM_CHAT_ID": TELEGRAM_CHAT,
+        "SUPABASE_URL": SUPABASE_URL,"SUPABASE_KEY": SUPABASE_KEY,
+    }.items() if not v]
+    if missing: log.error(f"Missing: {missing}"); return
+    log.info("All keys ✓")
+    run_scan()
+    schedule.every(30).minutes.do(run_scan)
+    log.info("Scheduler active — every 30 min, Mon-Fri 07:00-23:00 UTC")
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
+
+
+if __name__ == "__main__":
+    main()
