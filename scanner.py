@@ -146,7 +146,40 @@ RSS_FEEDS = [
     {"name":"World Nuclear News","url":"https://www.world-nuclear-news.org/rss"},
 ]
 
-seen_rss_ids = set()
+seen_rss_ids = set()  # populated from Supabase on startup
+
+def load_seen_ids():
+    """Load recently seen RSS IDs from Supabase to survive restarts."""
+    global seen_rss_ids
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/seen_rss_ids",
+            headers={**sb_headers(), "Prefer": "return=representation"},
+            params={"select": "guid", "order": "created_at.desc", "limit": "500"},
+            timeout=10
+        )
+        if r.ok:
+            data = r.json()
+            seen_rss_ids = {row["guid"] for row in data}
+            log.info(f"Loaded {len(seen_rss_ids)} seen IDs from Supabase")
+    except Exception as e:
+        log.warning(f"Could not load seen IDs: {e}")
+
+def save_seen_id(guid):
+    """Persist a seen RSS ID to Supabase."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/seen_rss_ids",
+            headers=sb_headers(),
+            json={"guid": guid},
+            timeout=5
+        )
+    except Exception as e:
+        log.warning(f"Could not save seen ID: {e}")
 client = Anthropic(api_key=ANTHROPIC_KEY)
 
 STRATEGY_PROMPT = """You are the AI analysis engine of SIS (Signal Intelligence System).
@@ -190,6 +223,9 @@ SIGNAL QUALITY RULES — apply these strictly:
 7. Only flag HIGH if: (a) immediate price catalyst exists, (b) specific tickers benefit, (c) information cycle is early — before consensus
 8. Flag MEDIUM if: developing story, clear theme fit, but timing unclear
 9. Flag LOW only if genuinely notable but no immediate trade — otherwise skip entirely
+10. ACCEPT major macro news with clear sector impact: tariffs, trade wars, sanctions, central bank decisions with named sector winners/losers
+11. ACCEPT any news naming a specific company with a clear positive or negative catalyst — earnings beats, contract wins, regulatory approvals, leadership changes
+12. Be LESS strict than you think you should be — it is better to flag a borderline story as MEDIUM than to miss a real signal. The trader will filter
 
 Think: "Would a sharp momentum trader read this and immediately know what to buy?" If no — reject it.
 
@@ -345,6 +381,8 @@ def fetch_rss(feed):
             guid  = item.findtext("guid", link).strip()
             if title and guid not in seen_rss_ids:
                 items.append({"headline":title,"source":feed["name"],"guid":guid})
+                seen_rss_ids.add(guid)
+                save_seen_id(guid)
         return items
     except Exception as e:
         log.warning(f"RSS error {feed['name']}: {e}"); return []
@@ -587,7 +625,8 @@ def run_scan():
 
 # ── Entry point ───────────────────────────────────────────────────
 def main():
-    log.info("SIS Scanner v6 — Supabase connected")
+    log.info("SIS Scanner v7 — Supabase connected")
+    load_seen_ids()  # Persist seen RSS IDs across restarts
     log.info(f"Tickers: {len(SCAN_TICKERS)} | Vol: {VOLUME_MULT}x | Price alert: {PRICE_ALERT_PCT}%")
     missing = [k for k,v in {
         "ANTHROPIC_API_KEY": ANTHROPIC_KEY,"FINNHUB_API_KEY": FINNHUB_KEY,
