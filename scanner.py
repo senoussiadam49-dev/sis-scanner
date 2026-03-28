@@ -448,6 +448,10 @@ def scan_rss_feeds():
                             )
                             time.sleep(0.5)
 
+            # Forward HIGH signals to PIT terminal
+            if strength == "HIGH":
+                send_to_pit(sig)
+
             # Send Telegram for HIGH/MEDIUM
             if strength == "LOW":
                 continue
@@ -542,11 +546,12 @@ def format_vol_alert(ticker, snap, a):
 # ── Main scan ─────────────────────────────────────────────────────
 def run_scan():
     now = datetime.now()
-    if now.weekday() >= 5: log.info("Weekend — skip"); return
+    # Run 7 days a week — Polymarket never closes
+    # Only skip outside hours (07:00-23:00 UTC)
     if now.hour < 7 or now.hour >= 23: log.info("Outside hours — skip"); return
 
     log.info("="*55)
-    log.info(f"SIS SCAN v6 — {now.strftime('%Y-%m-%d %H:%M UTC')}")
+    log.info(f"SIS SCAN v7 — {now.strftime('%Y-%m-%d %H:%M UTC')}")
     log.info(f"Tickers: {len(SCAN_TICKERS)} | Supabase: {'✓' if SUPABASE_URL else '✗'}")
     log.info("="*55)
 
@@ -557,7 +562,15 @@ def run_scan():
     log.info("--- RSS ---")
     scan_rss_feeds()
 
-    # 2. Volume scan
+    # 2. EIA energy data (runs every scan, only signals on significant moves)
+    log.info("--- EIA ENERGY DATA ---")
+    scan_eia_data()
+
+    # 3. SAM.gov defence contracts (new awards last 24hrs)
+    log.info("--- SAM.GOV CONTRACTS ---")
+    scan_sam_contracts()
+
+    # 4. Volume scan
     log.info("--- VOLUME SCAN ---")
     all_snaps = []; vol_signals = []
     for i, ticker in enumerate(SCAN_TICKERS):
@@ -573,11 +586,11 @@ def run_scan():
 
     log.info(f"Scan: {len(vol_signals)} signals from {len(all_snaps)} tickers")
 
-    # 3. Price alerts
+    # 5. Price alerts
     log.info("--- PRICE ALERTS ---")
     check_price_alerts(all_snaps)
 
-    # 4. AI analysis on top vol signals
+    # 6. AI analysis on top vol signals
     log.info("--- AI ANALYSIS ---")
     vol_signals.sort(key=lambda x: x["vol_ratio"], reverse=True)
     alerts = 0
@@ -615,10 +628,13 @@ def run_scan():
             if send_telegram(format_vol_alert(ticker, snap, a)): alerts += 1
             time.sleep(1)
 
+    eia_status = "✓" if EIA_API_KEY else "—"
+    sam_status = "✓" if SAM_API_KEY else "—"
+    pit_status = "✓" if PIT_SUPABASE_URL else "—"
     summary = (
-        f"📡 *SIS Scan v6* — {now.strftime('%H:%M UTC')}\n"
+        f"📡 *SIS Scan v7* — {now.strftime('%H:%M UTC')}\n"
         f"Vol signals: {len(vol_signals)} · Alerts: {alerts}\n"
-        f"Tickers: {len(SCAN_TICKERS)} · RSS ✓ · DB ✓"
+        f"RSS ✓ · EIA {eia_status} · SAM {sam_status} · PIT {pit_status}"
     )
     send_telegram(summary)
     log.info(f"Scan done — {alerts} alerts")
@@ -644,3 +660,300 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ── EIA Energy Data Scanner ───────────────────────────────────────
+EIA_API_KEY = os.environ.get("EIA_API_KEY", "")
+
+def scan_eia_data():
+    """
+    Check EIA weekly energy data for market-moving surprises.
+    Natural gas storage report — Thursdays 10:30am ET
+    Crude oil inventory report — Wednesdays 10:30am ET
+    """
+    if not EIA_API_KEY:
+        log.info("EIA: no API key — skip")
+        return
+
+    signals = []
+
+    # Natural gas storage (weekly)
+    try:
+        r = requests.get(
+            "https://api.eia.gov/v2/natural-gas/stor/wkly/data/",
+            params={
+                "api_key": EIA_API_KEY,
+                "frequency": "weekly",
+                "data[0]": "value",
+                "sort[0][column]": "period",
+                "sort[0][direction]": "desc",
+                "length": 4
+            },
+            timeout=15
+        )
+        if r.ok:
+            data = r.json().get("response", {}).get("data", [])
+            if len(data) >= 2:
+                latest = data[0]
+                prev   = data[1]
+                latest_val = latest.get("value", 0)
+                prev_val   = prev.get("value", 0)
+                change = latest_val - prev_val
+                # Typical weekly change is -50 to +100 bcf
+                # Surprise = deviation from seasonal norm
+                period = latest.get("period", "")
+                log.info(f"EIA Gas Storage: {latest_val} bcf (prev: {prev_val}, chg: {change:+.0f})")
+
+                # Flag significant draws (bullish for gas prices — EQT, LNG)
+                if change < -80:
+                    signals.append({
+                        "headline": f"EIA: Natural gas storage draw of {change:.0f} bcf — larger than expected",
+                        "source": "EIA Weekly Gas Storage",
+                        "theme": "Oil, Gas & Energy Geopolitics",
+                        "second_order": "Large storage draw tightens supply — bullish for Henry Hub, EQT, LNG exporters",
+                        "signal_strength": "HIGH",
+                        "tickers": ["EQT", "LNG", "AR", "RRC"],
+                        "action": f"Storage draw {change:.0f} bcf — check EQT thesis, consider adding if near support"
+                    })
+                elif change < -40:
+                    signals.append({
+                        "headline": f"EIA: Natural gas storage draw of {change:.0f} bcf this week",
+                        "source": "EIA Weekly Gas Storage",
+                        "theme": "Oil, Gas & Energy Geopolitics",
+                        "second_order": "Above-average storage draw supports gas prices — watch EQT and LNG names",
+                        "signal_strength": "MEDIUM",
+                        "tickers": ["EQT", "LNG", "AR"],
+                        "action": f"Monitor EQT — storage {change:.0f} bcf supports Henry Hub pricing"
+                    })
+                # Flag large builds (bearish)
+                elif change > 120:
+                    signals.append({
+                        "headline": f"EIA: Natural gas storage build of +{change:.0f} bcf — larger than expected",
+                        "source": "EIA Weekly Gas Storage",
+                        "theme": "Oil, Gas & Energy Geopolitics",
+                        "second_order": "Large storage build pressures gas prices — potential thesis risk for EQT position",
+                        "signal_strength": "HIGH",
+                        "tickers": ["EQT", "LNG"],
+                        "action": f"THESIS CHECK — storage build {change:+.0f} bcf. Review EQT stop loss at $57.50"
+                    })
+    except Exception as e:
+        log.warning(f"EIA gas storage error: {e}")
+
+    # Crude oil inventories (weekly)
+    try:
+        r = requests.get(
+            "https://api.eia.gov/v2/petroleum/stoc/wkly/data/",
+            params={
+                "api_key": EIA_API_KEY,
+                "frequency": "weekly",
+                "data[0]": "value",
+                "facets[duoarea][]": "NUS",
+                "facets[product][]": "EPC0",
+                "sort[0][column]": "period",
+                "sort[0][direction]": "desc",
+                "length": 3
+            },
+            timeout=15
+        )
+        if r.ok:
+            data = r.json().get("response", {}).get("data", [])
+            if len(data) >= 2:
+                change = data[0].get("value", 0) - data[1].get("value", 0)
+                log.info(f"EIA Crude Inventories: {change:+.0f}k barrels")
+                if abs(change) > 5000:  # 5M barrel surprise
+                    direction = "draw" if change < 0 else "build"
+                    bullish = change < 0
+                    signals.append({
+                        "headline": f"EIA: Crude oil inventory {direction} of {abs(change):.0f}k barrels — significant move",
+                        "source": "EIA Weekly Crude Inventories",
+                        "theme": "Oil, Gas & Energy Geopolitics",
+                        "second_order": f"Large crude {direction} {'supports' if bullish else 'pressures'} oil prices — watch energy sector",
+                        "signal_strength": "MEDIUM",
+                        "tickers": ["XOM", "CVX", "OXY", "COP"],
+                        "action": f"Crude {direction} {change:+.0f}k bbls — {'bullish' if bullish else 'bearish'} energy signal"
+                    })
+    except Exception as e:
+        log.warning(f"EIA crude error: {e}")
+
+    # Send signals
+    for sig in signals:
+        sb_insert("signals", {
+            "ticker": sig["tickers"][0] if sig["tickers"] else None,
+            "headline": sig["headline"],
+            "source": sig["source"],
+            "theme": sig["theme"],
+            "second_order": sig["second_order"],
+            "signal_strength": sig["signal_strength"],
+            "action": sig["action"],
+            "tickers": sig["tickers"],
+            "verdict": "HIGH" if sig["signal_strength"] == "HIGH" else "WATCHLIST",
+            "conviction": "High" if sig["signal_strength"] == "HIGH" else "Medium",
+            "is_watchlist": False
+        })
+        e = "🔴" if sig["signal_strength"] == "HIGH" else "🟡"
+        send_telegram(
+            f"{e} *EIA DATA SIGNAL — {sig['signal_strength']}*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"*Source:* {sig['source']}\n"
+            f"*Headline:* {sig['headline']}\n\n"
+            f"*Second Order:*\n↳ {sig['second_order']}\n\n"
+            f"*Action:* {sig['action']}\n"
+            f"*Tickers:* {' · '.join(['$'+t for t in sig['tickers']])}\n\n"
+            f"_SIS EIA · {datetime.now().strftime('%d %b %H:%M UTC')}_"
+        )
+        time.sleep(0.5)
+
+    log.info(f"EIA scan: {len(signals)} signals")
+
+
+# ── SAM.gov Defence Contract Scanner ─────────────────────────────
+SAM_API_KEY = os.environ.get("SAM_API_KEY", "")
+
+# Companies to watch for government contracts
+CONTRACT_WATCHLIST = {
+    "Palantir": "PLTR",
+    "Rocket Lab": "RKLB",
+    "Rubrik": "RBRK",
+    "Nvidia": "NVDA",
+    "Lockheed": "LMT",
+    "Northrop": "NOC",
+    "Raytheon": "RTX",
+    "General Dynamics": "GD",
+    "Booz Allen": "BAH",
+    "Leidos": "LDOS",
+    "SAIC": "SAIC",
+    "CACI": "CACI",
+    "Kratos": "KTOS",
+    "Axon": "AXON",
+    "CrowdStrike": "CRWD",
+    "Okta": "OKTA",
+}
+
+def scan_sam_contracts():
+    """
+    Scan SAM.gov for new defence/government contract awards.
+    All DoD contracts over $7.5M must be published within 24hrs.
+    This is genuinely early information — often before press releases.
+    """
+    if not SAM_API_KEY:
+        log.info("SAM.gov: no API key — skip")
+        return
+
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%m/%d/%Y")
+        today = datetime.now().strftime("%m/%d/%Y")
+
+        r = requests.get(
+            "https://api.sam.gov/prod/opportunities/v2/search",
+            params={
+                "api_key": SAM_API_KEY,
+                "postedFrom": yesterday,
+                "postedTo": today,
+                "ptype": "a",  # Award notices only
+                "limit": 100,
+                "deptname": "defense"
+            },
+            timeout=20
+        )
+
+        if not r.ok:
+            log.warning(f"SAM.gov error: {r.status_code}")
+            return
+
+        opportunities = r.json().get("opportunitiesData", [])
+        log.info(f"SAM.gov: {len(opportunities)} new defence awards")
+
+        for opp in opportunities:
+            title = opp.get("title", "")
+            award = opp.get("award", {})
+            amount = float(award.get("amount", 0))
+            awardee_name = award.get("awardee", {}).get("name", "")
+
+            if amount < 10_000_000:  # Only flag $10M+ contracts
+                continue
+
+            # Check if awardee matches our watchlist
+            matched_ticker = None
+            matched_company = None
+            for company, ticker in CONTRACT_WATCHLIST.items():
+                if company.lower() in awardee_name.lower() or company.lower() in title.lower():
+                    matched_ticker = ticker
+                    matched_company = company
+                    break
+
+            if not matched_ticker:
+                continue
+
+            amount_str = f"${amount/1_000_000:.0f}M" if amount < 1_000_000_000 else f"${amount/1_000_000_000:.1f}B"
+            theme = KNOWN_THEMES.get(matched_ticker, "Cyber & Defence Tech")
+
+            log.info(f"SAM.gov contract: {matched_ticker} — {amount_str} — {title[:60]}")
+
+            strength = "HIGH" if amount >= 100_000_000 else "MEDIUM"
+
+            sb_insert("signals", {
+                "ticker": matched_ticker,
+                "headline": f"{matched_company} wins {amount_str} DoD contract: {title[:80]}",
+                "source": "SAM.gov Contract Awards",
+                "theme": theme,
+                "second_order": f"Government contract win of {amount_str} — adds to backlog, reduces revenue risk",
+                "signal_strength": strength,
+                "action": f"Check {matched_ticker} — {amount_str} contract award confirms government demand thesis",
+                "tickers": [matched_ticker],
+                "verdict": "BUY" if strength == "HIGH" else "WATCHLIST",
+                "conviction": "High" if strength == "HIGH" else "Medium",
+                "is_watchlist": strength == "HIGH"
+            })
+
+            e = "🔴" if strength == "HIGH" else "🟡"
+            send_telegram(
+                f"{e} *DEFENCE CONTRACT — {amount_str}*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"*Company:* {matched_company} (${matched_ticker})\n"
+                f"*Amount:* {amount_str}\n"
+                f"*Contract:* {title[:100]}\n\n"
+                f"*Second Order:*\n↳ Backlog addition confirms government AI/defence spend accelerating\n\n"
+                f"*Action:* Open SIS terminal — check thesis alignment\n\n"
+                f"_SIS SAM.gov · {datetime.now().strftime('%d %b %H:%M UTC')}_"
+            )
+            time.sleep(0.5)
+
+    except Exception as e:
+        log.warning(f"SAM.gov scan error: {e}")
+
+
+# ── PIT Bridge — send HIGH signals to PIT Supabase ────────────────
+PIT_SUPABASE_URL = os.environ.get("PIT_SUPABASE_URL", "")
+PIT_SUPABASE_KEY = os.environ.get("PIT_SUPABASE_KEY", "")
+
+def send_to_pit(signal):
+    """
+    Forward HIGH conviction signals to PIT terminal's Supabase.
+    PIT can then find related Polymarket markets and potentially auto-bet.
+    """
+    if not PIT_SUPABASE_URL or not PIT_SUPABASE_KEY:
+        return
+    try:
+        requests.post(
+            f"{PIT_SUPABASE_URL}/rest/v1/sis_signals",
+            headers={
+                "apikey": PIT_SUPABASE_KEY,
+                "Authorization": f"Bearer {PIT_SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            },
+            json={
+                "headline": signal.get("headline", ""),
+                "theme": signal.get("theme", ""),
+                "second_order": signal.get("second_order", ""),
+                "tickers": signal.get("tickers", []),
+                "signal_strength": signal.get("signal_strength", ""),
+                "source": signal.get("source", ""),
+                "action": signal.get("action", ""),
+                "processed": False
+            },
+            timeout=10
+        )
+        log.info(f"PIT bridge: signal forwarded — {signal.get('headline','')[:60]}")
+    except Exception as e:
+        log.warning(f"PIT bridge error: {e}")
