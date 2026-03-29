@@ -548,7 +548,15 @@ def run_scan():
     now = datetime.now()
     # Run 7 days a week — Polymarket never closes
     # Only skip outside hours (07:00-23:00 UTC)
-    if now.hour < 7 or now.hour >= 23: log.info("Outside hours — skip"); return
+    # Stock markets closed on weekends — skip volume scan and price alerts
+    # RSS + EIA + SAM still run on weekdays only, less frequently on weekends
+    is_weekend = now.weekday() >= 5  # 5=Saturday, 6=Sunday
+    if now.hour < 7 or now.hour >= 23:
+        log.info("Outside hours — skip")
+        return
+    if is_weekend:
+        log.info("Weekend — skipping stock scan")
+        return
 
     log.info("="*55)
     log.info(f"SIS SCAN v7 — {now.strftime('%Y-%m-%d %H:%M UTC')}")
@@ -951,7 +959,7 @@ def main():
     if missing: log.error(f"Missing: {missing}"); return
     log.info("All keys ✓")
     run_scan()
-    schedule.every(30).minutes.do(run_scan)
+    schedule.every(60).minutes.do(run_scan)
     log.info("Scheduler active — every 30 min, Mon-Fri 07:00-23:00 UTC")
     while True:
         schedule.run_pending()
