@@ -147,6 +147,7 @@ RSS_FEEDS = [
 ]
 
 seen_rss_ids = set()  # populated from Supabase on startup
+seen_price_alerts = {}  # ticker -> last alert timestamp
 
 def load_seen_ids():
     """Load recently seen RSS IDs from Supabase to survive restarts."""
@@ -340,6 +341,12 @@ def check_price_alerts(snapshots):
         if snap["ticker"] not in CORE_WATCHLIST: continue
         chg = snap["price_chg"]
         if abs(chg) >= PRICE_ALERT_PCT:
+            # Only alert once per ticker per day
+            today = datetime.now().strftime('%Y-%m-%d')
+            alert_key = f"{snap['ticker']}_{today}"
+            if alert_key in seen_price_alerts:
+                continue
+            seen_price_alerts[alert_key] = datetime.now()
             d = "📈" if chg >= 0 else "📉"
             s = "+" if chg >= 0 else ""
             theme = KNOWN_THEMES.get(snap["ticker"],"—")
@@ -551,6 +558,9 @@ def run_scan():
     # Stock markets closed on weekends — skip volume scan and price alerts
     # RSS + EIA + SAM still run on weekdays only, less frequently on weekends
     is_weekend = now.weekday() >= 5  # 5=Saturday, 6=Sunday
+    if now.weekday() >= 5:
+        log.info("Weekend — market closed, skipping scan")
+        return
     if now.hour < 7 or now.hour >= 23:
         log.info("Outside hours — skip")
         return
@@ -959,7 +969,7 @@ def main():
     if missing: log.error(f"Missing: {missing}"); return
     log.info("All keys ✓")
     run_scan()
-    schedule.every(60).minutes.do(run_scan)
+    schedule.every(120).minutes.do(run_scan)
     log.info("Scheduler active — every 30 min, Mon-Fri 07:00-23:00 UTC")
     while True:
         schedule.run_pending()
